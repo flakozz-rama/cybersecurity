@@ -33,7 +33,7 @@ sudo chmod 600 /home/user1/secret.txt
 
 echo "File permissions set: rw------- (600)"
 echo "Verify with: ls -l /home/user1/secret.txt"
-ls -l /home/user1/secret.txt
+sudo ls -l /home/user1/secret.txt
 
 echo ""
 echo "[1.4] Verifying access control"
@@ -61,11 +61,11 @@ echo "ACL entry added: user2 has read permission"
 echo ""
 echo "[2.3] Verifying ACL permissions"
 echo "File ACL (getfacl):"
-getfacl /home/user1/secret.txt
+sudo getfacl /home/user1/secret.txt
 
 echo ""
 echo "File permissions (ls -l) - note the '+' indicating ACL:"
-ls -l /home/user1/secret.txt
+sudo ls -l /home/user1/secret.txt
 
 echo ""
 echo "Testing user2 access (should now succeed):"
