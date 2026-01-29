@@ -1,6 +1,6 @@
 #!/bin/bash
 
-set -e
+set +e
 
 echo "=============================================="
 echo "Laboratory Work №2: DAC and MAC in Linux"
