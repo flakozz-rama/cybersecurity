@@ -55,6 +55,7 @@ sudo apt-get install -y acl
 
 echo ""
 echo "[2.2] Granting read access to user2 via ACL"
+sudo chmod o+x /home/user1
 sudo setfacl -m u:user2:r /home/user1/secret.txt
 echo "ACL entry added: user2 has read permission"
 
@@ -100,8 +101,7 @@ echo "[3.4] Creating a sample AppArmor profile for demonstration"
 
 echo '#!/bin/bash
 echo "Hello from test script"
-cat /etc/passwd > /dev/null
-echo "Read /etc/passwd successfully"
+cat /etc/passwd > /dev/null && echo "Read /etc/passwd successfully" || echo "BLOCKED: AppArmor denied access to /etc/passwd"
 ' | sudo tee /usr/local/bin/test_apparmor.sh
 sudo chmod +x /usr/local/bin/test_apparmor.sh
 
