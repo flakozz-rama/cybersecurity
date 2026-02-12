@@ -31,10 +31,17 @@ echo "----------------------------------------------"
 
 # --- 1.1 Install dependencies ---
 echo "[1.1] Installing Suricata and dependencies..."
+
+# Fix any broken dpkg state from previous runs
+dpkg --configure -a 2>/dev/null
+
 apt-get update -qq
 add-apt-repository -y ppa:oisf/suricata-stable 2>/dev/null || true
 apt-get update -qq
-apt-get install -y suricata suricata-update jq
+
+# Note: suricata 8.x bundles suricata-update, do NOT install it separately
+apt-get install -y -o Dpkg::Options::="--force-overwrite" suricata jq
+
 echo "[OK] Suricata installed"
 echo ""
 
@@ -58,20 +65,115 @@ echo ""
 # --- 1.4 Configure Suricata ---
 echo "[1.4] Configuring Suricata for IPS mode..."
 
+# Locate the actual suricata.yaml (may vary by version/distro)
+SURICATA_CONF=""
+for candidate in /etc/suricata/suricata.yaml /usr/local/etc/suricata/suricata.yaml; do
+    if [ -f "$candidate" ]; then
+        SURICATA_CONF="$candidate"
+        break
+    fi
+done
+
+if [ -z "$SURICATA_CONF" ]; then
+    # Config missing — try to regenerate from dpkg or locate
+    echo "  [INFO] Config not found, attempting to regenerate..."
+    dpkg --configure -a 2>/dev/null
+    apt-get install -y --reinstall -o Dpkg::Options::="--force-overwrite" suricata 2>/dev/null
+
+    for candidate in /etc/suricata/suricata.yaml /usr/local/etc/suricata/suricata.yaml; do
+        if [ -f "$candidate" ]; then
+            SURICATA_CONF="$candidate"
+            break
+        fi
+    done
+fi
+
+if [ -z "$SURICATA_CONF" ]; then
+    echo "  [ERROR] Cannot find suricata.yaml. Generating minimal config..."
+    mkdir -p /etc/suricata/rules
+    SURICATA_CONF="/etc/suricata/suricata.yaml"
+    cat > "$SURICATA_CONF" << 'YAMLEOF'
+%YAML 1.1
+---
+vars:
+  address-groups:
+    HOME_NET: "[192.168.0.0/16,10.0.0.0/8,172.16.0.0/12]"
+    EXTERNAL_NET: "!$HOME_NET"
+  port-groups:
+    HTTP_PORTS: "80"
+    SHELLCODE_PORTS: "!80"
+    SSH_PORTS: "22"
+
+default-log-dir: /var/log/suricata/
+stats:
+  enabled: yes
+  interval: 8
+
+outputs:
+  - fast:
+      enabled: yes
+      filename: fast.log
+      append: yes
+  - eve-log:
+      enabled: yes
+      filetype: regular
+      filename: eve.json
+      community-id: true
+      types:
+        - alert:
+            tagged-packets: yes
+        - stats:
+            totals: yes
+            threads: no
+
+nfq:
+  mode: accept
+  repeat-mark: 1
+  repeat-mask: 1
+  route-queue: 2
+  batchcount: 20
+  fail-open: yes
+
+default-rule-path: /var/lib/suricata/rules
+rule-files:
+  - suricata.rules
+  - custom.rules
+
+classification-file: /etc/suricata/classification.config
+reference-config-file: /etc/suricata/reference.config
+YAMLEOF
+
+    # Create classification.config if missing
+    if [ ! -f /etc/suricata/classification.config ]; then
+        cat > /etc/suricata/classification.config << 'CLASSEOF'
+config classification: attempted-recon,Attempted Information Leak,2
+config classification: attempted-admin,Attempted Administrator Privilege Gain,1
+config classification: attempted-dos,Attempted Denial of Service,2
+CLASSEOF
+    fi
+
+    # Create reference.config if missing
+    if [ ! -f /etc/suricata/reference.config ]; then
+        touch /etc/suricata/reference.config
+    fi
+fi
+
+echo "  Using config: $SURICATA_CONF"
+
 # Backup original config
-cp /etc/suricata/suricata.yaml /etc/suricata/suricata.yaml.bak.lab6
+cp "$SURICATA_CONF" "${SURICATA_CONF}.bak.lab6" 2>/dev/null
 
 # Set HOME_NET
 if [ -n "$LOCAL_NET" ]; then
     HOME_NET_CIDR=$(echo "$LOCAL_NET" | sed 's|/[0-9]*|/24|')
-    sed -i "s|HOME_NET:.*|HOME_NET: \"[$HOME_NET_CIDR]\"|" /etc/suricata/suricata.yaml
+    sed -i "s|HOME_NET:.*|HOME_NET: \"[$HOME_NET_CIDR]\"|" "$SURICATA_CONF"
     echo "  HOME_NET set to [$HOME_NET_CIDR]"
 else
     echo "  HOME_NET: using default [192.168.0.0/16,10.0.0.0/8,172.16.0.0/12]"
 fi
 
 # Enable community-id for log correlation
-sed -i 's/community-id: false/community-id: true/' /etc/suricata/suricata.yaml 2>/dev/null
+sed -i 's/community-id: false/community-id: true/' "$SURICATA_CONF" 2>/dev/null
 
 echo "[OK] Suricata configured"
 echo ""
@@ -91,7 +193,15 @@ echo "----------------------------------------------"
 
 echo "[2.1] Creating custom rules file..."
 
-cat > /etc/suricata/rules/custom.rules << 'RULES'
+# Determine rules directory from config
+RULES_DIR=$(grep "default-rule-path" "$SURICATA_CONF" 2>/dev/null | awk '{print $2}' | tr -d '"')
+if [ -z "$RULES_DIR" ]; then
+    RULES_DIR="/var/lib/suricata/rules"
+fi
+mkdir -p "$RULES_DIR"
+mkdir -p /etc/suricata/rules 2>/dev/null
+
+cat > "${RULES_DIR}/custom.rules" << 'RULES'
 # =============================================================================
 # Custom IPS Rules - Laboratory Work 6
 # =============================================================================
@@ -168,25 +278,25 @@ drop icmp any any -> $HOME_NET any ( \
 )
 RULES
 
-echo "[OK] Custom rules created at /etc/suricata/rules/custom.rules"
+echo "[OK] Custom rules created at ${RULES_DIR}/custom.rules"
 echo ""
 
 # --- 2.2 Register custom rules in config ---
 echo "[2.2] Registering custom rules in Suricata config..."
-if ! grep -q "custom.rules" /etc/suricata/suricata.yaml; then
+if ! grep -q "custom.rules" "$SURICATA_CONF"; then
     # Add custom.rules to the rule-files section
-    sed -i '/^rule-files:/a\  - custom.rules' /etc/suricata/suricata.yaml 2>/dev/null
-    # Also try the default-rule-path method
-    if [ -d /var/lib/suricata/rules ]; then
-        cp /etc/suricata/rules/custom.rules /var/lib/suricata/rules/custom.rules
-    fi
+    sed -i '/rule-files:/a\  - custom.rules' "$SURICATA_CONF" 2>/dev/null
+fi
+# Ensure custom rules exist in the default-rule-path directory
+if [ -d /var/lib/suricata/rules ] && [ "$RULES_DIR" != "/var/lib/suricata/rules" ]; then
+    cp "${RULES_DIR}/custom.rules" /var/lib/suricata/rules/custom.rules
 fi
 echo "[OK] Custom rules registered"
 echo ""
 
 # --- 2.3 Validate configuration ---
 echo "[2.3] Validating Suricata configuration..."
-suricata -T -c /etc/suricata/suricata.yaml 2>&1 | tail -5
+suricata -T -c "$SURICATA_CONF" 2>&1 | tail -5
 echo ""
 
 # --- 2.4 Set up NFQUEUE for inline mode ---
@@ -214,13 +324,13 @@ pkill -f "suricata" 2>/dev/null
 sleep 2
 
 # Start in IPS mode with NFQUEUE
-suricata -c /etc/suricata/suricata.yaml -q 0 -D
+suricata -c "$SURICATA_CONF" -q 0 -D
 sleep 3
 
 if pgrep -x suricata > /dev/null; then
     echo "[OK] Suricata is running in IPS mode (PID: $(pgrep -x suricata))"
 else
-    echo "[WARN] Suricata may not have started. Check: suricata -c /etc/suricata/suricata.yaml -q 0"
+    echo "[WARN] Suricata may not have started. Check: suricata -c $SURICATA_CONF -q 0"
 fi
 echo ""
 
@@ -363,8 +473,8 @@ echo "  SID 9000004 - ICMP Flood         (>50 echo/10s)"
 echo "  SID 9000005 - Oversized ICMP     (>1000 bytes)"
 echo ""
 echo "Config files for report:"
-echo "  /etc/suricata/suricata.yaml"
-echo "  /etc/suricata/rules/custom.rules"
+echo "  $SURICATA_CONF"
+echo "  ${RULES_DIR}/custom.rules"
 echo ""
 echo "Log files for report:"
 echo "  /var/log/suricata/fast.log   (human-readable alerts)"
@@ -385,5 +495,5 @@ echo "  iptables -D INPUT -j NFQUEUE --queue-num 0"
 echo "  iptables -D FORWARD -j NFQUEUE --queue-num 0"
 echo ""
 echo "Backup created:"
-echo "  /etc/suricata/suricata.yaml.bak.lab6"
+echo "  ${SURICATA_CONF}.bak.lab6"
 echo ""
