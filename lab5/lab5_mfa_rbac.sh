@@ -218,7 +218,7 @@ echo ""
 
 # Restart SSH
 echo "[2.5] Restarting SSH service..."
-systemctl restart sshd
+systemctl restart sshd 2>/dev/null || systemctl restart ssh
 echo "[OK] SSH restarted"
 echo ""
 
